@@ -49,34 +49,41 @@ namespace NzbDrone.Core.Download
                 return;
             }
 
-            if (message.EpisodeIds.Count == 1)
-            {
-                _logger.Debug("Failed download only contains one episode, searching again");
-
-                _commandQueueManager.Push(new EpisodeSearchCommand(message.EpisodeIds));
-
-                return;
-            }
+            // if (message.EpisodeIds.Count == 1)
+            // {
+            //     _logger.Debug("Failed download only contains one episode, searching again");
+            //
+            //     _commandQueueManager.Push(new EpisodeSearchCommand(message.EpisodeIds));
+            //
+            //     return;
+            // }
 
             var seasonNumber = _episodeService.GetEpisode(message.EpisodeIds.First()).SeasonNumber;
-            var episodesInSeason = _episodeService.GetEpisodesBySeason(message.SeriesId, seasonNumber);
 
-            if (message.EpisodeIds.Count == episodesInSeason.Count)
+            // var episodesInSeason = _episodeService.GetEpisodesBySeason(message.SeriesId, seasonNumber);
+
+            _commandQueueManager.Push(new SeasonSearchCommand
             {
-                _logger.Debug("Failed download was entire season, searching again");
+                SeriesId = message.SeriesId,
+                SeasonNumber = seasonNumber
+            });
 
-                _commandQueueManager.Push(new SeasonSearchCommand
-                {
-                    SeriesId = message.SeriesId,
-                    SeasonNumber = seasonNumber
-                });
-
-                return;
-            }
-
-            _logger.Debug("Failed download contains multiple episodes, probably a double episode, searching again");
-
-            _commandQueueManager.Push(new EpisodeSearchCommand(message.EpisodeIds));
+            // if (message.EpisodeIds.Count == episodesInSeason.Count)
+            // {
+            //     _logger.Debug("Failed download was entire season, searching again");
+            //
+            //     _commandQueueManager.Push(new SeasonSearchCommand
+            //     {
+            //         SeriesId = message.SeriesId,
+            //         SeasonNumber = seasonNumber
+            //     });
+            //
+            //     return;
+            // }
+            //
+            // _logger.Debug("Failed download contains multiple episodes, probably a double episode, searching again");
+            //
+            // _commandQueueManager.Push(new EpisodeSearchCommand(message.EpisodeIds));
         }
     }
 }
