@@ -285,7 +285,7 @@ namespace NzbDrone.Core.Download
             var preventDownloadLoops = bool.TryParse(Environment.GetEnvironmentVariable("PREVENT_DOWNLOAD_LOOPS"), out var enabled) && enabled;
             if (preventDownloadLoops && IsSameAsLastImportedRelease(remoteEpisode))
             {
-                _logger.Info("Skipping download: Detected potential download loop for release '{0}' from Indexer {1}.");
+                _logger.Info("Skipping download: Detected potential download loop for release '{0}'.", remoteEpisode.Release.Title);
                 return ProcessedDecisionResult.SkippedDownloadLoop;
             }
 
