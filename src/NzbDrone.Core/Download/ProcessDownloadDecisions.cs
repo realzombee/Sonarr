@@ -3,11 +3,15 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
 using NLog;
+using NzbDrone.Common.Instrumentation.Extensions;
+using NzbDrone.Core.Configuration;
 using NzbDrone.Core.DecisionEngine;
 using NzbDrone.Core.Download.Clients;
 using NzbDrone.Core.Download.Pending;
 using NzbDrone.Core.Exceptions;
+using NzbDrone.Core.History;
 using NzbDrone.Core.Indexers;
+using NzbDrone.Core.Parser.Model;
 
 namespace NzbDrone.Core.Download
 {
@@ -22,16 +26,22 @@ namespace NzbDrone.Core.Download
         private readonly IDownloadService _downloadService;
         private readonly IPrioritizeDownloadDecision _prioritizeDownloadDecision;
         private readonly IPendingReleaseService _pendingReleaseService;
+        private readonly IHistoryService _historyService;
+        private readonly IConfigService _configService;
         private readonly Logger _logger;
 
         public ProcessDownloadDecisions(IDownloadService downloadService,
                                         IPrioritizeDownloadDecision prioritizeDownloadDecision,
                                         IPendingReleaseService pendingReleaseService,
+                                        IHistoryService historyService,
+                                        IConfigService configService,
                                         Logger logger)
         {
             _downloadService = downloadService;
             _prioritizeDownloadDecision = prioritizeDownloadDecision;
             _pendingReleaseService = pendingReleaseService;
+            _historyService = historyService;
+            _configService = configService;
             _logger = logger;
         }
 
@@ -41,6 +51,7 @@ namespace NzbDrone.Core.Download
             var prioritizedDecisions = _prioritizeDownloadDecision.PrioritizeDecisions(qualifiedReports);
             var grabbed = new List<DownloadDecision>();
             var pending = new List<DownloadDecision>();
+            var skippedDownloadLoop = new List<DownloadDecision>();
             var rejected = decisions.Where(d => d.Rejected).ToList();
 
             var pendingAddQueue = new List<Tuple<DownloadDecision, PendingReleaseReason>>();
@@ -53,7 +64,7 @@ namespace NzbDrone.Core.Download
                 var downloadProtocol = report.RemoteEpisode.Release.DownloadProtocol;
 
                 // Skip if already grabbed
-                if (IsEpisodeProcessed(grabbed, report))
+                if (IsEpisodeProcessed(grabbed.Concat(skippedDownloadLoop).ToList(), report))
                 {
                     continue;
                 }
@@ -113,12 +124,23 @@ namespace NzbDrone.Core.Download
                         {
                             break;
                         }
+
+                    case ProcessedDecisionResult.SkippedDownloadLoop:
+                        {
+                            skippedDownloadLoop.Add(report);
+                            break;
+                        }
                 }
             }
 
             if (pendingAddQueue.Any())
             {
                 _pendingReleaseService.AddMany(pendingAddQueue);
+            }
+
+            if (skippedDownloadLoop.Count > 0)
+            {
+                _logger.ProgressInfo("Skipped {0} releases due to a detected download loop.", skippedDownloadLoop.Count);
             }
 
             return new ProcessedDecisions(grabbed, pending, rejected);
@@ -193,10 +215,79 @@ namespace NzbDrone.Core.Download
             pending.Add(report);
         }
 
+        private bool IsSameAsLastImportedRelease(RemoteEpisode remoteEpisode)
+        {
+            // Try to prevent download loops
+            // Check if the last grabbed and imported release matches this release, if so reject it
+            var cdhEnabled = _configService.EnableCompletedDownloadHandling;
+
+            if (!cdhEnabled)
+            {
+                _logger.Debug("Skipping download loop check: CDH is disabled");
+                return false;
+            }
+
+            var release = remoteEpisode.Release;
+
+            return remoteEpisode.Episodes.All(episode =>
+            {
+                if (!episode.HasFile)
+                {
+                    _logger.Debug("Skipping download loop check: release has at least one episode without a file");
+                    return false;
+                }
+
+                var historyForEpisode = _historyService.FindByEpisodeId(episode.Id);
+                var lastGrabbed = historyForEpisode.FirstOrDefault(h => h.EventType == EpisodeHistoryEventType.Grabbed);
+
+                if (lastGrabbed == null)
+                {
+                    return false;
+                }
+
+                var imported = historyForEpisode.FirstOrDefault(h =>
+                    h.EventType == EpisodeHistoryEventType.DownloadFolderImported &&
+                    h.DownloadId == lastGrabbed.DownloadId);
+
+                if (imported == null)
+                {
+                    return false;
+                }
+
+                if (release.DownloadProtocol == DownloadProtocol.Torrent)
+                {
+                    var torrentInfo = release as TorrentInfo;
+
+                    if (torrentInfo?.InfoHash != null && torrentInfo.InfoHash.ToUpper() == lastGrabbed.DownloadId)
+                    {
+                        _logger.Debug("Has same torrent hash as the last grabbed and imported release");
+                        return true;
+                    }
+                }
+
+                // Only based on title because a release with the same title on another indexer/released at
+                // a different time very likely has the exact same content and we don't need to also try it.
+                if (release.Title.Equals(lastGrabbed.SourceTitle, StringComparison.InvariantCultureIgnoreCase))
+                {
+                    _logger.Debug("Has same release name as the last grabbed and imported release");
+                    return true;
+                }
+
+                return false;
+            });
+        }
+
         private async Task<ProcessedDecisionResult> ProcessDecisionInternal(DownloadDecision decision, int? downloadClientId = null)
         {
             var remoteEpisode = decision.RemoteEpisode;
             var remoteIndexer = remoteEpisode.Release.Indexer;
+
+            var preventDownloadLoops = bool.TryParse(Environment.GetEnvironmentVariable("PREVENT_DOWNLOAD_LOOPS"), out var enabled) && enabled;
+            if (preventDownloadLoops && IsSameAsLastImportedRelease(remoteEpisode))
+            {
+                _logger.Info("Skipping download: Detected potential download loop for release '{0}' from Indexer {1}.");
+                return ProcessedDecisionResult.SkippedDownloadLoop;
+            }
 
             try
             {
